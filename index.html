@@ -1,1 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tank Wars</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0d0d1a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
 
+        /* Lobby UI */
+        #lobby-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(10, 10, 26, 0.95);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        .lobby-card {
+            background: #16213e;
+            border: 2px solid #0f3460;
+            border-radius: 16px;
+            padding: 40px;
+            width: 360px;
+            box-shadow: 0 0 40px rgba(0, 180, 255, 0.1);
+        }
+        .lobby-card h1 {
+            color: #e94560;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 28px;
+            text-transform: uppercase;
+        }
+        .field { margin-bottom: 20px; }
+        .field label {
+            display: block;
+            color: #8892b0;
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+        .field input {
+            width: 100%;
+            padding: 10px;
+            background: #0d1b35;
+            border: 1px solid #1a3a5c;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 14px;
+        }
+        #join-btn {
+            width: 100%;
+            padding: 12px;
+            background: #e94560;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        #join-btn:hover { background: #ff6b6b; }
+        #status-msg {
+            margin-top: 15px;
+            font-size: 12px;
+            text-align: center;
+            color: #ff6b6b;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container"></div>
+
+<!-- Lobby Overlay -->
+<div id="lobby-overlay">
+    <div class="lobby-card">
+        <h1>⚔ Tank Wars</h1>
+        <div class="field">
+            <label>Your Name</label>
+            <input id="input-player" type="text" placeholder="Player 1" maxlength="12">
+        </div>
+        <div class="field">
+            <label>Room Name</label>
+            <input id="input-room" type="text" placeholder="Room 101" maxlength="20">
+        </div>
+        <button id="join-btn">JOIN ROOM</button>
+        <div id="status-msg"></div>
+    </div>
+</div>
+
+<script>
+// --- CONFIG ---
+const SUPABASE_URL = 'https://cfpgcvpgackxbmntprcu.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_vyWzynJ_iP8IbyKTD5vKkQ__X3WygwD';
+let supabaseClient = null;
+
+// --- HELPERS ---
+const TANK_COLORS = [0xe94560, 0x00b4d8, 0x64ffda, 0xffd700, 0xff6b35, 0xa855f7];
+
+// Generate terrain height map
+function buildTerrainPoints(width, canvasHeight) {
+    const base = canvasHeight * 0.65;
+    const pts = [];
+    for (let x = 0; x <= width; x++) {
+        // Random hills using sine waves
+        const y = base 
+            + Math.sin(x * 0.015) * 60 
+            + Math.sin(x * 0.04) * 20 
+            + Math.sin(x * 0.005) * 40;
+        pts.push({ x, y });
+    }
+    return pts;
+}
+
+// Get Y position at specific X
+function getTerrainY(x, points) {
+    const idx = Math.max(0, Math.min(Math.round(x), points.length - 1));
+    return points[idx].y;
+}
+
+// --- SCENES ---
+
+class BootScene extends Phaser.Scene {
+    constructor() { super({ key: 'BootScene' }); }
+    create() {
+        // Just a silent background
+    }
+}
+
+class GameScene extends Phaser.Scene {
+    constructor() { super({ key: 'GameScene' }); }
+
+    init(data) {
+        this.playerName = data.playerName;
+        this.roomName = data.roomName;
+        this.playerIndex = data.playerIndex;
+        this.terrainPoints = [];
+    }
+
+    create() {
+        const W = 800;
+        const H = 600;
+
+        // 1. Draw Sky
+        this.add.rectangle(400, 300, W, H, 0x1a1a2e);
+
+        // 2. Draw Terrain
+        this.terrainPoints = buildTerrainPoints(W, H);
+        const terrainGfx = this.add.graphics();
+        terrainGfx.fillStyle(0x2d6a4f, 1); // Green color
+        
+        // Draw path
+        terrainGfx.beginPath();
+        terrainGfx.moveTo(0, H);
+        for (let pt of this.terrainPoints) {
+            terrainGfx.lineTo(pt.x, pt.y);
+        }
+        terrainGfx.lineTo(W, H);
+        terrainGfx.closePath();
+        terrainGfx.fillPath();
+
+        // 3. Draw Player Tank
+        // Spawn X: Random position
+        const spawnX = Phaser.Math.Between(100, 700);
+        const groundY = getTerrainY(spawnX, this.terrainPoints);
+        const color = TANK_COLORS[this.playerIndex % TANK_COLORS.length];
+
+        this.drawTank(spawnX, groundY, color, this.playerName);
+        
+        // 4. UI Text
+        this.add.text(10, 10, `Room: ${this.roomName}`, { font: '16px Arial', fill: '#fff' });
+        this.add.text(10, 30, `Player: ${this.playerName}`, { font: '14px Arial', fill: '#aaa' });
+    }
+
+    drawTank(x, groundY, color, name) {
+        const gfx = this.add.graphics();
+        
+        // Tracks
+        gfx.fillStyle(0x222222, 1);
+        gfx.fillRoundedRect(x - 24, groundY - 10, 48, 10, 3);
+        
+        // Body
+        gfx.fillStyle(color, 1);
+        gfx.fillRect(x - 20, groundY - 24, 40, 14);
+        
+        // Turret
+        gfx.fillRect(x - 10, groundY - 34, 20, 10);
+        
+        // Barrel
+        gfx.fillRect(x + 10, groundY - 32, 24, 6);
+
+        // Name Label
+        this.add.text(x, groundY - 50, name, {
+            font: '12px Arial',
+            fill: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+    }
+}
+
+// --- INITIALIZATION ---
+const config = {
+    type: Phaser.AUTO,
+    width: 800,
+    height: 600,
+    parent: 'game-container',
+    backgroundColor: '#1a1a2e',
+    scene: [BootScene, GameScene]
+};
+
+const game = new Phaser.Game(config);
+
+// --- LOBBY LOGIC ---
+document.getElementById('join-btn').addEventListener('click', async () => {
+    const nameInput = document.getElementById('input-player');
+    const roomInput = document.getElementById('input-room');
+    const statusDiv = document.getElementById('status-msg');
+    
+    const name = nameInput.value.trim();
+    const room = roomInput.value.trim();
+
+    if (!name || !room) {
+        statusDiv.textContent = "Please enter Name and Room!";
+        return;
+    }
+
+    statusDiv.textContent = "Connecting...";
+    statusDiv.className = "info";
+
+    try {
+        // 1. Init Supabase
+        if (!supabaseClient) {
+            supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        }
+
+        // 2. Check Room
+        let { data, error } = await supabaseClient
+            .from('game_rooms')
+            .select('*')
+            .eq('room_name', room)
+            .single();
+
+        let playerIndex = 0;
+        let players = [];
+
+        if (error && error.code === 'PGRST116') {
+            // Room doesn't exist -> Create
+            players = [{ name: name, x: 0, hp: 100 }];
+            await supabaseClient.from('game_rooms').insert({ room_name: room, players: players });
+            playerIndex = 0;
+        } 
+        else if (data) {
+            // Room exists -> Join
+            players = data.players || [];
+            if (players.find(p => p.name === name)) {
+                // Player re-joining
+                playerIndex = players.findIndex(p => p.name === name);
+            } else {
+                // New player
+                players.push({ name: name, x: 0, hp: 100 });
+                await supabaseClient.from('game_rooms')
+                    .update({ players: players })
+                    .eq('room_name', room);
+                playerIndex = players.length - 1;
+            }
+        } else {
+            throw error;
+        }
+
+        // 3. Hide Lobby & Start Game
+        document.getElementById('lobby-overlay').style.display = 'none';
+        game.scene.start('GameScene', { 
+            playerName: name, 
+            roomName: room, 
+            playerIndex: playerIndex 
+        });
+
+    } catch (err) {
+        console.error(err);
+        statusDiv.textContent = "Error: " + err.message;
+        statusDiv.className = "error";
+    }
+});
+</script>
+</body>
+</html>
