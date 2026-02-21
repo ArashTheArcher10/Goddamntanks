@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tank Wars</title>
+    <title>Tank Wars - Phase 3</title>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
     <style>
@@ -75,8 +75,53 @@
             margin-top: 15px;
             font-size: 12px;
             text-align: center;
-            color: #ff6b6b;
         }
+        .error { color: #ff6b6b; }
+        .info { color: #8892b0; }
+
+        /* Game UI */
+        #game-ui {
+            display: none;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(16, 26, 46, 0.9);
+            border: 2px solid #0f3460;
+            border-radius: 8px;
+            padding: 15px;
+            width: 200px;
+            z-index: 50;
+            color: #fff;
+            box-shadow: 0 0 15px rgba(0,0,0,0.5);
+        }
+        #turn-indicator {
+            font-size: 18px;
+            font-weight: bold;
+            color: #e94560;
+            margin-bottom: 5px;
+        }
+        #moves-left {
+            font-size: 14px;
+            color: #8892b0;
+            margin-bottom: 15px;
+        }
+        #end-turn-btn {
+            width: 100%;
+            padding: 10px;
+            background: #e94560;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        #end-turn-btn:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+        #end-turn-btn:hover:not(:disabled) { background: #ff6b6b; }
+
     </style>
 </head>
 <body>
@@ -100,6 +145,13 @@
     </div>
 </div>
 
+<!-- In-Game UI overlay -->
+<div id="game-ui">
+    <div id="turn-indicator">Turn: ???</div>
+    <div id="moves-left">Moves: 200</div>
+    <button id="end-turn-btn" disabled>END TURN</button>
+</div>
+
 <script>
 // --- CONFIG ---
 const SUPABASE_URL = 'https://cfpgcvpgackxbmntprcu.supabase.co';
@@ -109,12 +161,10 @@ let supabaseClient = null;
 // --- HELPERS ---
 const TANK_COLORS = [0xe94560, 0x00b4d8, 0x64ffda, 0xffd700, 0xff6b35, 0xa855f7];
 
-// Generate terrain height map
 function buildTerrainPoints(width, canvasHeight) {
     const base = canvasHeight * 0.65;
     const pts = [];
     for (let x = 0; x <= width; x++) {
-        // Random hills using sine waves
         const y = base 
             + Math.sin(x * 0.015) * 60 
             + Math.sin(x * 0.04) * 20 
@@ -124,7 +174,6 @@ function buildTerrainPoints(width, canvasHeight) {
     return pts;
 }
 
-// Get Y position at specific X
 function getTerrainY(x, points) {
     const idx = Math.max(0, Math.min(Math.round(x), points.length - 1));
     return points[idx].y;
@@ -134,9 +183,6 @@ function getTerrainY(x, points) {
 
 class BootScene extends Phaser.Scene {
     constructor() { super({ key: 'BootScene' }); }
-    create() {
-        // Just a silent background
-    }
 }
 
 class GameScene extends Phaser.Scene {
@@ -145,69 +191,259 @@ class GameScene extends Phaser.Scene {
     init(data) {
         this.playerName = data.playerName;
         this.roomName = data.roomName;
-        this.playerIndex = data.playerIndex;
+        this.gameData = data.gameData;
+        this.currentTurnIndex = data.gameData.current_turn_index || 0;
         this.terrainPoints = [];
+        this.tankSprites = {}; // Holds container and graphical parts 
+        this.movesLeft = 200;
+        this.lastStatePush = 0;
     }
 
     create() {
         const W = 800;
         const H = 600;
 
-        // 1. Draw Sky
+        // 1. Draw Sky & Terrain
         this.add.rectangle(400, 300, W, H, 0x1a1a2e);
-
-        // 2. Draw Terrain
         this.terrainPoints = buildTerrainPoints(W, H);
-        const terrainGfx = this.add.graphics();
-        terrainGfx.fillStyle(0x2d6a4f, 1); // Green color
         
-        // Draw path
+        const terrainGfx = this.add.graphics();
+        terrainGfx.fillStyle(0x2d6a4f, 1);
         terrainGfx.beginPath();
         terrainGfx.moveTo(0, H);
-        for (let pt of this.terrainPoints) {
-            terrainGfx.lineTo(pt.x, pt.y);
-        }
+        for (let pt of this.terrainPoints) terrainGfx.lineTo(pt.x, pt.y);
         terrainGfx.lineTo(W, H);
         terrainGfx.closePath();
         terrainGfx.fillPath();
 
-        // 3. Draw Player Tank
-        // Spawn X: Random position
-        const spawnX = Phaser.Math.Between(100, 700);
-        const groundY = getTerrainY(spawnX, this.terrainPoints);
-        const color = TANK_COLORS[this.playerIndex % TANK_COLORS.length];
+        // Reveal HTML Game UI
+        document.getElementById('game-ui').style.display = 'block';
 
-        this.drawTank(spawnX, groundY, color, this.playerName);
+        // Set up graphical objects for syncing
+        this.trajectoryLine = this.add.graphics();
         
-        // 4. UI Text
-        this.add.text(10, 10, `Room: ${this.roomName}`, { font: '16px Arial', fill: '#fff' });
-        this.add.text(10, 30, `Player: ${this.playerName}`, { font: '14px Arial', fill: '#aaa' });
+        // Render initial tanks
+        this.gameData.players.forEach((p, index) => {
+            this.createTankSprite(p, index);
+        });
+
+        // Initialize UI State
+        this.checkTurnReset();
+        this.updateDOM_UI();
+
+        // Input
+        this.cursors = this.input.keyboard.createCursorKeys();
+
+        // Event to catch key release to do a crisp final state sync
+        this.input.keyboard.on('keyup', (e) => {
+            if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.code) && this.isMyTurn()) {
+                this.pushStateToDB();
+            }
+        });
+
+        // Event to prevent default scrolling via arrows
+        this.input.keyboard.on('keydown', (e) => {
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+                e.preventDefault();
+            }
+        });
+
+        // Setup Realtime Sync
+        this.supabaseSubscription = supabaseClient.channel('db-changes')
+            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'game_rooms' }, payload => {
+                if (payload.new.room_name === this.roomName) {
+                    this.syncState(payload.new);
+                }
+            })
+            .subscribe();
     }
 
-    drawTank(x, groundY, color, name) {
-        const gfx = this.add.graphics();
-        
-        // Tracks
-        gfx.fillStyle(0x222222, 1);
-        gfx.fillRoundedRect(x - 24, groundY - 10, 48, 10, 3);
-        
-        // Body
-        gfx.fillStyle(color, 1);
-        gfx.fillRect(x - 20, groundY - 24, 40, 14);
-        
-        // Turret
-        gfx.fillRect(x - 10, groundY - 34, 20, 10);
-        
-        // Barrel
-        gfx.fillRect(x + 10, groundY - 32, 24, 6);
+    createTankSprite(tankData, index) {
+        const color = TANK_COLORS[index % TANK_COLORS.length];
+        const y = getTerrainY(tankData.x, this.terrainPoints);
+        const container = this.add.container(tankData.x, y);
 
-        // Name Label
-        this.add.text(x, groundY - 50, name, {
-            font: '12px Arial',
-            fill: '#ffffff',
-            stroke: '#000000',
-            strokeThickness: 3
+        // Tracks + Body
+        const body = this.add.graphics();
+        body.fillStyle(0x222222, 1);
+        body.fillRoundedRect(-24, -10, 48, 10, 3);
+        body.fillStyle(color, 1);
+        body.fillRect(-20, -24, 40, 14);
+        container.add(body);
+
+        // Turret (Separate graphic to pivot independently at its base)
+        const turret = this.add.graphics();
+        turret.fillStyle(color, 1);
+        turret.fillRect(0, -3, 20, 6); // Barrel
+        turret.y = -22; 
+        turret.rotation = tankData.aimAngle || -Math.PI / 4;
+        container.add(turret);
+
+        // Name Tag
+        const label = this.add.text(0, -45, tankData.name, {
+            font: '12px Arial', fill: '#ffffff', stroke: '#000000', strokeThickness: 3
         }).setOrigin(0.5);
+        container.add(label);
+
+        this.tankSprites[tankData.name] = { container, body, turret, label };
+    }
+
+    updateTankVisuals(tankData) {
+        if (!this.tankSprites[tankData.name]) return;
+        const sprite = this.tankSprites[tankData.name];
+        
+        // Clamp bounds securely inside world
+        tankData.x = Phaser.Math.Clamp(tankData.x, 20, 780);
+
+        sprite.container.x = tankData.x;
+        sprite.container.y = getTerrainY(tankData.x, this.terrainPoints);
+        sprite.turret.rotation = tankData.aimAngle;
+    }
+
+    drawTrajectory(tankData) {
+        this.trajectoryLine.clear();
+        this.trajectoryLine.fillStyle(0xffffff, 0.6);
+        
+        const startX = tankData.x;
+        const startY = getTerrainY(tankData.x, this.terrainPoints) - 22;
+
+        const dx = Math.cos(tankData.aimAngle);
+        const dy = Math.sin(tankData.aimAngle);
+        
+        // Draw dotted lines manually tracking outward
+        for(let i = 25; i <= 200; i += 15) {
+            this.trajectoryLine.fillCircle(startX + dx * i, startY + dy * i, 2);
+        }
+    }
+
+    isMyTurn() {
+        if (!this.gameData || !this.gameData.players) return false;
+        const myIndex = this.gameData.players.findIndex(p => p.name === this.playerName);
+        const activeIndex = this.currentTurnIndex % this.gameData.players.length;
+        return activeIndex === myIndex;
+    }
+
+    updateDOM_UI() {
+        const activeIndex = this.currentTurnIndex % this.gameData.players.length;
+        const activePlayer = this.gameData.players[activeIndex];
+        const myTurn = this.isMyTurn();
+
+        document.getElementById('turn-indicator').textContent = 'Turn: ' + (activePlayer ? activePlayer.name : 'Unknown');
+        document.getElementById('end-turn-btn').disabled = !myTurn;
+        document.getElementById('moves-left').textContent = 'Moves: ' + (myTurn ? this.movesLeft : '-');
+    }
+
+    checkTurnReset() {
+        if (this.isMyTurn()) {
+            this.movesLeft = 200; // Reset fuel on new turn
+        } else {
+            this.trajectoryLine.clear();
+        }
+    }
+
+    // Called automatically by Realtime Event Listener
+    syncState(newData) {
+        const oldTurnIndex = this.currentTurnIndex;
+        
+        this.currentTurnIndex = newData.current_turn_index || 0;
+        const myTurn = this.isMyTurn();
+
+        // Parse new player locations and updates
+        for (let i = 0; i < newData.players.length; i++) {
+            const remoteP = newData.players[i];
+
+            // DO NOT override locally for the ACTIVE player to prevent stuttering issues.
+            // The active player is the source of truth for their own movement coordinates.
+            if (myTurn && remoteP.name === this.playerName) {
+                continue; 
+            }
+
+            // Otherwise, accept remote data changes
+            this.gameData.players[i] = remoteP;
+
+            if (!this.tankSprites[remoteP.name]) {
+                this.createTankSprite(remoteP, i);
+            } else {
+                this.updateTankVisuals(remoteP);
+            }
+        }
+
+        if (this.currentTurnIndex !== oldTurnIndex) {
+             this.checkTurnReset();
+        }
+        
+        this.updateDOM_UI();
+    }
+
+    async pushStateToDB() {
+        try {
+            await supabaseClient.from('game_rooms')
+                .update({ players: this.gameData.players })
+                .eq('room_name', this.roomName);
+        } catch (err) {
+            console.error("Sync error:", err);
+        }
+    }
+
+    async handleEndTurn() {
+        if (!this.isMyTurn()) return; // Anti-spam check
+
+        // Optimistically update locally
+        this.currentTurnIndex++;
+        this.trajectoryLine.clear();
+        this.updateDOM_UI();
+
+        // Push state array + new turn logic to database
+        try {
+            await supabaseClient.from('game_rooms')
+                .update({ 
+                    current_turn_index: this.currentTurnIndex, 
+                    players: this.gameData.players 
+                })
+                .eq('room_name', this.roomName);
+        } catch(e) { console.error(e); }
+    }
+
+    update(time, delta) {
+        if (!this.gameData || !this.gameData.players || !this.isMyTurn()) return;
+
+        let moved = false;
+        let aimed = false;
+        const myPlayerIndex = this.gameData.players.findIndex(p => p.name === this.playerName);
+        const myTankData = this.gameData.players[myPlayerIndex];
+
+        // Handles left/right Movement (sticks to terrain implicitly during visual draw)
+        if (this.cursors.left.isDown && this.movesLeft > 0) {
+            myTankData.x -= 1;
+            this.movesLeft -= 1;
+            moved = true;
+        } else if (this.cursors.right.isDown && this.movesLeft > 0) {
+            myTankData.x += 1;
+            this.movesLeft -= 1;
+            moved = true;
+        }
+
+        // Handles Turret Aiming
+        if (this.cursors.up.isDown) {
+            myTankData.aimAngle -= 0.05;
+            aimed = true;
+        } else if (this.cursors.down.isDown) {
+            myTankData.aimAngle += 0.05;
+            aimed = true;
+        }
+
+        if (moved || aimed) {
+            // Update immediately locally to ensure zero-lag experience
+            this.updateTankVisuals(myTankData);
+            this.drawTrajectory(myTankData);
+            this.updateDOM_UI(); 
+
+            // Throttle Database requests while button is firmly held down
+            if (time - this.lastStatePush > 200) {
+                this.pushStateToDB();
+                this.lastStatePush = time;
+            }
+        }
     }
 }
 
@@ -223,7 +459,9 @@ const config = {
 
 const game = new Phaser.Game(config);
 
-// --- LOBBY LOGIC ---
+// --- DOM EVENT LISTENERS ---
+
+// Map Lobby Join Button
 document.getElementById('join-btn').addEventListener('click', async () => {
     const nameInput = document.getElementById('input-player');
     const roomInput = document.getElementById('input-room');
@@ -234,64 +472,72 @@ document.getElementById('join-btn').addEventListener('click', async () => {
 
     if (!name || !room) {
         statusDiv.textContent = "Please enter Name and Room!";
+        statusDiv.className = "error";
         return;
     }
 
-    statusDiv.textContent = "Connecting...";
+    statusDiv.textContent = "Connecting to database...";
     statusDiv.className = "info";
 
     try {
-        // 1. Init Supabase
         if (!supabaseClient) {
             supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
         }
 
-        // 2. Check Room
         let { data, error } = await supabaseClient
             .from('game_rooms')
             .select('*')
             .eq('room_name', room)
             .single();
 
-        let playerIndex = 0;
-        let players = [];
+        let gameData = data;
+        let newX = Phaser.Math.Between(150, 650);
 
         if (error && error.code === 'PGRST116') {
-            // Room doesn't exist -> Create
-            players = [{ name: name, x: 0, hp: 100 }];
-            await supabaseClient.from('game_rooms').insert({ room_name: room, players: players });
-            playerIndex = 0;
+            // Room misses entirely, so CREATE it with the first index details.
+            let initPlayers = [{ name: name, x: newX, aimAngle: -Math.PI/4, hp: 100 }];
+            const insertReq = await supabaseClient.from('game_rooms').insert({
+                 room_name: room, 
+                 players: initPlayers,
+                 current_turn_index: 0
+            }).select().single();
+            gameData = insertReq.data;
         } 
         else if (data) {
-            // Room exists -> Join
-            players = data.players || [];
-            if (players.find(p => p.name === name)) {
-                // Player re-joining
-                playerIndex = players.findIndex(p => p.name === name);
-            } else {
-                // New player
-                players.push({ name: name, x: 0, hp: 100 });
-                await supabaseClient.from('game_rooms')
+            // Room exists: attempt to add or reload player.
+            let players = data.players || [];
+            if (!players.find(p => p.name === name)) {
+                players.push({ name: name, x: newX, aimAngle: -Math.PI/4, hp: 100 });
+                const updateReq = await supabaseClient.from('game_rooms')
                     .update({ players: players })
-                    .eq('room_name', room);
-                playerIndex = players.length - 1;
+                    .eq('room_name', room)
+                    .select().single();
+                gameData = updateReq.data;
             }
         } else {
             throw error;
         }
 
-        // 3. Hide Lobby & Start Game
+        // Successfully negotiated Data, launch the Game Scene!
         document.getElementById('lobby-overlay').style.display = 'none';
         game.scene.start('GameScene', { 
             playerName: name, 
             roomName: room, 
-            playerIndex: playerIndex 
+            gameData: gameData
         });
 
     } catch (err) {
         console.error(err);
         statusDiv.textContent = "Error: " + err.message;
         statusDiv.className = "error";
+    }
+});
+
+// Map In-Game End Turn button natively to current loaded Game Scene
+document.getElementById('end-turn-btn').addEventListener('click', () => {
+    const scene = game.scene.getScene('GameScene');
+    if (scene && scene.handleEndTurn) {
+        scene.handleEndTurn();
     }
 });
 </script>
